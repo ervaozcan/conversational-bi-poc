@@ -114,8 +114,8 @@ with right_col:
             sql = item.get("sql", "")
 
             st.markdown(f"### {cfg['title']}")
-            
-            # KPI Kartları
+
+            # --- KPI KARTLARI (DÜZELTİLDİ) ---
             numeric_cols = [c for c in df.select_dtypes(include='number').columns if not any(x in c.upper() for x in ['ID', 'NO', 'KOD'])]
             kpi_cols = st.columns(3)
             kpi_cols[0].metric("Satır / Grup Sayısı", len(df))
@@ -125,8 +125,10 @@ with right_col:
                 kpi_cols[1].metric(f"Toplam {numeric_cols[0]}", f"{val1:,.2f}")
             if len(numeric_cols) > 1:
                 val2 = df[numeric_cols[1]].sum()
-                kpi_cols[2].metric(f"Toplam {numeric_cols[2]}", f"{val2:,.2f}")
+                # numeric_cols[2] yerine numeric_cols[1] yazıldı:
+                kpi_cols[2].metric(f"Toplam {numeric_cols[1]}", f"{val2:,.2f}")
             
+
             # Grafik
             if cfg["chart_type"] == "bar":
                 fig = px.bar(df, x=cfg["x_column"], y=cfg["y_column"])
