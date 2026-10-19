@@ -38,14 +38,13 @@ if uploaded_file is not None:
     
     active_data_path = st.session_state.get("uploaded_temp_path", "data/sales_data.csv")
 
-# --- YENİ: GEÇMİŞİ VE GRAFİKLERİ TEMİZLEME BUTONU ---
 st.sidebar.markdown("---")
 if st.sidebar.button("🗑️ Sohbeti ve Paneli Sıfırla", use_container_width=True):
     st.session_state.messages = []
     st.session_state.charts_history = []
     st.rerun()
 
-# --- VERİ KÜMESİ DEĞİŞTİĞİNDE SİSTEMİ YENİDEN BAŞLATMA ---
+# --- VERİ KÜMESİ BAŞLATMA ---
 if "current_data_path" not in st.session_state or st.session_state.current_data_path != active_data_path:
     st.session_state.current_data_path = active_data_path
     st.session_state.provider = LocalDuckDBProvider(active_data_path)
@@ -59,25 +58,22 @@ left_col, right_col = st.columns([1, 1])
 with left_col:
     st.subheader("💬 Asistan ile Sohbet")
     
-    # Sohbet Geçmişi Gösterimi
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.write(msg["content"])
 
-    # --- YENİ: HIZLI SORU BUTONLARI ---
-    st.markdown("💡 **Örnek Sorular:**")
+    st.markdown("💡 **Örnek Başlangıç Soruları:**")
     prompt_cols = st.columns(3)
     quick_prompt = None
     
-    if prompt_cols[0].button("📍 Bölgesel Siparişler", use_container_width=True):
-        quick_prompt = "Bölgelere göre sipariş sayılarının dağılımını bar chart olarak göster."
-    if prompt_cols[1].button("🏷️ Kategori Ciroları", use_container_width=True):
-        quick_prompt = "Ürün kategorilerine göre toplam tutar dağılımını pie chart ile göster."
+    if prompt_cols[0].button("📍 Bölgesel Ciro", use_container_width=True):
+        quick_prompt = "Bölgelere göre toplam tutar dağılımını bar chart olarak göster."
+    if prompt_cols[1].button("🏷️ Kategori Dağılımı", use_container_width=True):
+        quick_prompt = "Kategorilere göre satış adedi dağılımını pie chart ile göster."
     if prompt_cols[2].button("🏆 En Çok Satanlar", use_container_width=True):
-        quick_prompt = "En çok adet satan ilk 5 ürünü ve satış adetlerini bar chart olarak göster."
+        quick_prompt = "En çok ciro getiren ilk 5 ürünü bar chart olarak listele."
 
-    # Kullanıcı girdisi (chat input veya tıklanan hızlı soru)
-    typed_input = st.chat_input("Verilerinizle ilgili bir soru sorun...")
+    typed_input = st.chat_input("Verilerinizle ilgili bir soru veya takip sorusu sorun...")
     user_input = quick_prompt if quick_prompt else typed_input
     
     if user_input:
@@ -86,10 +82,10 @@ with left_col:
             st.write(user_input)
 
         with st.chat_message("assistant"):
-            with st.spinner("Veri analiz ediliyor..."):
+            with st.spinner("Veri analiz ediliyor ve içgörüler çıkarılıyor..."):
                 try:
                     api_history = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[:-1]]
-                    response_text, df, chart_config = st.session_state.agent.chat(user_input, api_history)
+                    response_text, df, chart_config, sql_query = st.session_state.agent.chat(user_input, api_history)
                     
                     st.write(response_text)
                     st.session_state.messages.append({"role": "assistant", "content": response_text})
@@ -97,13 +93,14 @@ with left_col:
                     if df is not None and chart_config is not None:
                         st.session_state.charts_history.append({
                             "config": chart_config,
-                            "df": df
+                            "df": df,
+                            "sql": sql_query
                         })
                         st.rerun()
                 except Exception as e:
                     err_msg = str(e)
                     if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
-                        st.warning("⚠️ Google API dakikalık kullanım limitine ulaşıldı. Lütfen 1 dakika bekleyip sorunuzu tekrar sorun.")
+                        st.warning("⚠️ Google API dakikalık kullanım limitine ulaşıldı. Lütfen 1 dakika bekleyin.")
                     else:
                         st.error(f"Sorgu işlenirken bir hata oluştu: {err_msg}")
 
@@ -114,13 +111,14 @@ with right_col:
         for idx, item in enumerate(st.session_state.charts_history):
             cfg = item["config"]
             df = item["df"]
+            sql = item.get("sql", "")
 
             st.markdown(f"### {cfg['title']}")
             
             # KPI Kartları
             numeric_cols = [c for c in df.select_dtypes(include='number').columns if not any(x in c.upper() for x in ['ID', 'NO', 'KOD'])]
             kpi_cols = st.columns(3)
-            kpi_cols[0].metric("Satır / Kayıt Sayısı", len(df))
+            kpi_cols[0].metric("Satır / Grup Sayısı", len(df))
             
             if len(numeric_cols) > 0:
                 val1 = df[numeric_cols[0]].sum()
@@ -139,8 +137,10 @@ with right_col:
 
             st.plotly_chart(fig, use_container_width=True, key=f"chart_{idx}")
             
-            # Ham Veri ve İndirme Butonları
-            with st.expander(f"'{cfg['title']}' Ham Verisini Gör ve İndir"):
+            # Ham Veri, SQL ve İndirme Butonları
+            with st.expander(f"'{cfg['title']}' Detayları, SQL Sorgusu ve İndirme"):
+                if sql:
+                    st.code(sql, language="sql")
                 st.dataframe(df)
                 
                 btn_col1, btn_col2 = st.columns(2)
@@ -168,4 +168,4 @@ with right_col:
             
             st.divider()
     else:
-        st.info("Henüz bir grafik oluşturulmadı. Sol panelden soru sorarak veya yukarıdaki öneri butonlarına basarak görselleştirme isteyebilirsiniz.")
+        st.info("Henüz bir grafik oluşturulmadı. Sol panelden soru sorarak analiz başlatabilirsiniz.")

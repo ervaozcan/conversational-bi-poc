@@ -46,7 +46,6 @@ class BIAgent:
         return [types.Tool(function_declarations=[execute_sql_func, generate_chart_func])]
 
     def _generate_with_retry(self, contents, config, max_retries=3):
-        """API isteklerini yöneten ve 503/429 hatalarında otomatik bekleyip tekrar deneyen yardımcı fonksiyon"""
         for attempt in range(max_retries):
             try:
                 return self.client.models.generate_content(
@@ -56,10 +55,8 @@ class BIAgent:
                 )
             except APIError as e:
                 error_msg = str(e)
-                # Sadece aşırı yüklenme (503) veya kota sınırı (429) hatalarında tekrar dene
                 if ("503" in error_msg or "429" in error_msg) and attempt < max_retries - 1:
-                    wait_time = 3 * (attempt + 1)  # 3, 6 sn bekler
-                    time.sleep(wait_time)
+                    time.sleep(3 * (attempt + 1))
                 else:
                     raise e
 
@@ -72,7 +69,6 @@ class BIAgent:
             temperature=0.1
         )
 
-        # 1. Sohbet geçmişinde None veya boş içerik kalmasını engelliyoruz
         contents = []
         for msg in history:
             role = "model" if msg["role"] == "assistant" else "user"
@@ -81,13 +77,12 @@ class BIAgent:
         
         contents.append(types.Content(role="user", parts=[types.Part.from_text(text=user_message)]))
 
-        # İlk modeli çağırma (Retry mantığı ile)
         response = self._generate_with_retry(contents, config)
 
         last_df = None
         chart_config = None
+        executed_sql = None
 
-        # 2. Döngü ile birden fazla araç çağrısını (SQL + Grafik) sıralı işliyoruz
         while response.function_calls:
             contents.append(response.candidates[0].content)
             
@@ -100,6 +95,7 @@ class BIAgent:
                 if tool_name == "execute_sql":
                     try:
                         sql = tool_inputs.get("sql_query", "")
+                        executed_sql = sql
                         df = self.data_provider.run_query(sql)
                         last_df = df
                         tool_result_content = df.to_json(orient="records")
@@ -108,7 +104,7 @@ class BIAgent:
 
                 elif tool_name == "generate_chart":
                     chart_config = dict(tool_inputs)
-                    tool_result_content = "Grafik konfigürasyonu başarıyla kaydedildi."
+                    tool_result_content = "Grafik konfigürasyonu kaydedildi."
 
                 tool_response_parts.append(
                     types.Part.from_function_response(
@@ -122,18 +118,16 @@ class BIAgent:
                 parts=tool_response_parts
             ))
 
-            # Araç yanıtından sonra modeli tekrar çağırma (Retry mantığı ile)
             response = self._generate_with_retry(contents, config)
 
         final_text = response.text or ""
 
-        # 3. Yanıtın None dönmesini kesin olarak engelliyoruz
         if not final_text.strip():
             if chart_config:
-                final_text = "İstediğiniz grafik oluşturuldu."
+                final_text = "İstediğiniz grafik ve analitik özet oluşturuldu."
             elif last_df is not None:
                 final_text = "Veri sorgulandı ve sonuçlar hazırlandı."
             else:
                 final_text = "İşleminiz tamamlandı."
 
-        return final_text, last_df, chart_config
+        return final_text, last_df, chart_config, executed_sql
