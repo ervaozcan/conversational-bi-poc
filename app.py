@@ -12,16 +12,15 @@ load_dotenv()
 st.set_page_config(page_title="Conversational BI Dashboard", layout="wide")
 st.title("📊 Conversational BI Assistant")
 
-# --- SOL MENÜ: DOSYA YÜKLEME ALANI ---
-st.sidebar.header("📁 Veri Kaynağı Yükle")
+# --- SOL MENÜ: DOSYA YÜKLEME VE YÖNETİM ---
+st.sidebar.header("📁 Veri Kaynağı")
 uploaded_file = st.sidebar.file_uploader(
-    "Analiz etmek istediğiniz CSV veya Excel dosyasını seçin", 
+    "CSV veya Excel dosyası yükleyin", 
     type=["csv", "xlsx", "xls"]
 )
 
-active_data_path = "data/sales_data.csv"  # Varsayılan dosya
+active_data_path = "data/sales_data.csv"
 
-# Dosya yükleme optimizasyonu: Sadece yeni bir dosya yüklendiğinde diske yazar
 if uploaded_file is not None:
     if st.session_state.get("last_uploaded_filename") != uploaded_file.name:
         os.makedirs("data", exist_ok=True)
@@ -39,6 +38,13 @@ if uploaded_file is not None:
     
     active_data_path = st.session_state.get("uploaded_temp_path", "data/sales_data.csv")
 
+# --- YENİ: GEÇMİŞİ VE GRAFİKLERİ TEMİZLEME BUTONU ---
+st.sidebar.markdown("---")
+if st.sidebar.button("🗑️ Sohbeti ve Paneli Sıfırla", use_container_width=True):
+    st.session_state.messages = []
+    st.session_state.charts_history = []
+    st.rerun()
+
 # --- VERİ KÜMESİ DEĞİŞTİĞİNDE SİSTEMİ YENİDEN BAŞLATMA ---
 if "current_data_path" not in st.session_state or st.session_state.current_data_path != active_data_path:
     st.session_state.current_data_path = active_data_path
@@ -53,11 +59,26 @@ left_col, right_col = st.columns([1, 1])
 with left_col:
     st.subheader("💬 Asistan ile Sohbet")
     
+    # Sohbet Geçmişi Gösterimi
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.write(msg["content"])
 
-    user_input = st.chat_input("Verilerinizle ilgili bir soru sorun...")
+    # --- YENİ: HIZLI SORU BUTONLARI ---
+    st.markdown("💡 **Örnek Sorular:**")
+    prompt_cols = st.columns(3)
+    quick_prompt = None
+    
+    if prompt_cols[0].button("📍 Bölgesel Siparişler", use_container_width=True):
+        quick_prompt = "Bölgelere göre sipariş sayılarının dağılımını bar chart olarak göster."
+    if prompt_cols[1].button("🏷️ Kategori Ciroları", use_container_width=True):
+        quick_prompt = "Ürün kategorilerine göre toplam tutar dağılımını pie chart ile göster."
+    if prompt_cols[2].button("🏆 En Çok Satanlar", use_container_width=True):
+        quick_prompt = "En çok adet satan ilk 5 ürünü ve satış adetlerini bar chart olarak göster."
+
+    # Kullanıcı girdisi (chat input veya tıklanan hızlı soru)
+    typed_input = st.chat_input("Verilerinizle ilgili bir soru sorun...")
+    user_input = quick_prompt if quick_prompt else typed_input
     
     if user_input:
         st.session_state.messages.append({"role": "user", "content": user_input})
@@ -96,9 +117,8 @@ with right_col:
 
             st.markdown(f"### {cfg['title']}")
             
-            # --- YENİ EKLENEN KISIM: OTOMATİK KPI KARTLARI ---
+            # KPI Kartları
             numeric_cols = [c for c in df.select_dtypes(include='number').columns if not any(x in c.upper() for x in ['ID', 'NO', 'KOD'])]
-            
             kpi_cols = st.columns(3)
             kpi_cols[0].metric("Satır / Kayıt Sayısı", len(df))
             
@@ -107,10 +127,9 @@ with right_col:
                 kpi_cols[1].metric(f"Toplam {numeric_cols[0]}", f"{val1:,.2f}")
             if len(numeric_cols) > 1:
                 val2 = df[numeric_cols[1]].sum()
-                kpi_cols[2].metric(f"Toplam {numeric_cols[1]}", f"{val2:,.2f}")
-            # ------------------------------------------------
+                kpi_cols[2].metric(f"Toplam {numeric_cols[2]}", f"{val2:,.2f}")
             
-            # --- GRAFİK ÇİZİMİ ---
+            # Grafik
             if cfg["chart_type"] == "bar":
                 fig = px.bar(df, x=cfg["x_column"], y=cfg["y_column"])
             elif cfg["chart_type"] == "line":
@@ -120,13 +139,12 @@ with right_col:
 
             st.plotly_chart(fig, use_container_width=True, key=f"chart_{idx}")
             
-            # --- YENİ EKLENEN KISIM: EXPORT (İNDİRME) BUTONLARI ---
+            # Ham Veri ve İndirme Butonları
             with st.expander(f"'{cfg['title']}' Ham Verisini Gör ve İndir"):
                 st.dataframe(df)
                 
                 btn_col1, btn_col2 = st.columns(2)
                 
-                # CSV İndirme
                 csv_data = df.to_csv(index=False).encode('utf-8')
                 btn_col1.download_button(
                     label="📥 CSV Olarak İndir",
@@ -136,7 +154,6 @@ with right_col:
                     key=f"csv_btn_{idx}"
                 )
                 
-                # Excel İndirme (openpyxl gerekli)
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
                     df.to_excel(writer, index=False, sheet_name='Veri')
@@ -148,8 +165,7 @@ with right_col:
                     mime="application/vnd.ms-excel",
                     key=f"excel_btn_{idx}"
                 )
-            # ------------------------------------------------------
             
             st.divider()
     else:
-        st.info("Henüz bir grafik oluşturulmadı. Sol panelden soru sorarak veri görselleştirmesi isteyebilirsiniz.")
+        st.info("Henüz bir grafik oluşturulmadı. Sol panelden soru sorarak veya yukarıdaki öneri butonlarına basarak görselleştirme isteyebilirsiniz.")
