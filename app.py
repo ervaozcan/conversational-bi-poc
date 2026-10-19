@@ -1,77 +1,5 @@
-
-'''import streamlit as st
-import plotly.express as px
-from dotenv import load_dotenv
-from providers.local_duckdb import LocalDuckDBProvider
-from ai.agent import BIAgent
-
-load_dotenv()
-
-st.set_page_config(page_title="Conversational BI Dashboard", layout="wide")
-st.title("📊 Conversational BI Assistant")
-
-if "provider" not in st.session_state:
-    st.session_state.provider = LocalDuckDBProvider("data/sales_data.csv")
-    st.session_state.agent = BIAgent(st.session_state.provider)
-    st.session_state.messages = []
-    st.session_state.current_df = None
-    st.session_state.current_chart = None
-
-left_col, right_col = st.columns([1, 1])
-
-with left_col:
-    st.subheader("💬 Asistan ile Sohbet")
-    
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.write(msg["content"])
-            
-
-    user_input = st.chat_input("Verilerinizle ilgili bir soru sorun...")
-    
-    if user_input:
-        st.session_state.messages.append({"role": "user", "content": user_input})
-        with st.chat_message("user"):
-            st.write(user_input)
-
-        with st.chat_message("assistant"):
-            with st.spinner("Veri analiz ediliyor..."):
-                api_history = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[:-1]]
-                response_text, df, chart_config = st.session_state.agent.chat(user_input, api_history)
-                
-                st.write(response_text)
-                st.session_state.messages.append({"role": "assistant", "content": response_text})
-                
-                if df is not None:
-                    st.session_state.current_df = df
-                if chart_config is not None:
-                    st.session_state.current_chart = chart_config
-
-with right_col:
-    st.subheader("📈 Dinamik Dashboard Paneli")
-
-    if st.session_state.current_chart and st.session_state.current_df is not None:
-        cfg = st.session_state.current_chart
-        df = st.session_state.current_df
-
-        st.markdown(f"### {cfg['title']}")
-        
-        if cfg["chart_type"] == "bar":
-            fig = px.bar(df, x=cfg["x_column"], y=cfg["y_column"])
-        elif cfg["chart_type"] == "line":
-            fig = px.line(df, x=cfg["x_column"], y=cfg["y_column"])
-        elif cfg["chart_type"] == "pie":
-            fig = px.pie(df, names=cfg["x_column"], values=cfg["y_column"])
-
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Henüz bir grafik oluşturulmadı. Sol panelden soru sorarak veri görselleştirmesi isteyebilirsiniz.")
-
-    if st.session_state.current_df is not None:
-        with st.expander("Son Sorgunun Ham Verisini Gör"):
-            st.dataframe(st.session_state.current_df) '''
-
 import os
+import io
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -168,6 +96,21 @@ with right_col:
 
             st.markdown(f"### {cfg['title']}")
             
+            # --- YENİ EKLENEN KISIM: OTOMATİK KPI KARTLARI ---
+            numeric_cols = [c for c in df.select_dtypes(include='number').columns if not any(x in c.upper() for x in ['ID', 'NO', 'KOD'])]
+            
+            kpi_cols = st.columns(3)
+            kpi_cols[0].metric("Satır / Kayıt Sayısı", len(df))
+            
+            if len(numeric_cols) > 0:
+                val1 = df[numeric_cols[0]].sum()
+                kpi_cols[1].metric(f"Toplam {numeric_cols[0]}", f"{val1:,.2f}")
+            if len(numeric_cols) > 1:
+                val2 = df[numeric_cols[1]].sum()
+                kpi_cols[2].metric(f"Toplam {numeric_cols[1]}", f"{val2:,.2f}")
+            # ------------------------------------------------
+            
+            # --- GRAFİK ÇİZİMİ ---
             if cfg["chart_type"] == "bar":
                 fig = px.bar(df, x=cfg["x_column"], y=cfg["y_column"])
             elif cfg["chart_type"] == "line":
@@ -177,8 +120,35 @@ with right_col:
 
             st.plotly_chart(fig, use_container_width=True, key=f"chart_{idx}")
             
-            with st.expander(f"'{cfg['title']}' Ham Verisini Gör"):
+            # --- YENİ EKLENEN KISIM: EXPORT (İNDİRME) BUTONLARI ---
+            with st.expander(f"'{cfg['title']}' Ham Verisini Gör ve İndir"):
                 st.dataframe(df)
+                
+                btn_col1, btn_col2 = st.columns(2)
+                
+                # CSV İndirme
+                csv_data = df.to_csv(index=False).encode('utf-8')
+                btn_col1.download_button(
+                    label="📥 CSV Olarak İndir",
+                    data=csv_data,
+                    file_name=f"analiz_{idx}.csv",
+                    mime="text/csv",
+                    key=f"csv_btn_{idx}"
+                )
+                
+                # Excel İndirme (openpyxl gerekli)
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                    df.to_excel(writer, index=False, sheet_name='Veri')
+                
+                btn_col2.download_button(
+                    label="📥 Excel Olarak İndir",
+                    data=buffer.getvalue(),
+                    file_name=f"analiz_{idx}.xlsx",
+                    mime="application/vnd.ms-excel",
+                    key=f"excel_btn_{idx}"
+                )
+            # ------------------------------------------------------
             
             st.divider()
     else:
