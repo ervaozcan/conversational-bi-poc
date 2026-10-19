@@ -9,3 +9,4 @@ class BaseDataProvider(ABC):
     @abstractmethod
     def get_schema(self) -> str:
         pass
+

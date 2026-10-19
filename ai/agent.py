@@ -1,98 +1,139 @@
 import json
 import os
-from anthropic import Anthropic
+import time
+from google import genai
+from google.genai import types
+from google.genai.errors import APIError
 from providers.base import BaseDataProvider
 from ai.prompts import SYSTEM_PROMPT_TEMPLATE
 
 class BIAgent:
     def __init__(self, data_provider: BaseDataProvider):
-        self.client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        self.client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
         self.data_provider = data_provider
-        self.model = "claude-3-5-sonnet-20241022"
+        self.model_name = "gemini-3.6-flash"
 
     def get_tools(self):
-        return [
-            {
-                "name": "execute_sql",
-                "description": "Veritabanında SQL sorgusu çalıştırır ve sonuçları döner.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "sql_query": {"type": "string", "description": "Çalıştırılacak geçerli SQL sorgusu"}
-                    },
-                    "required": ["sql_query"]
-                }
-            },
-            {
-                "name": "generate_chart",
-                "description": "Sorgu sonucuna göre grafik konfigürasyonu oluşturur.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "chart_type": {"type": "string", "enum": ["bar", "line", "pie"]},
-                        "title": {"type": "string"},
-                        "x_column": {"type": "string"},
-                        "y_column": {"type": "string"}
-                    },
-                    "required": ["chart_type", "title", "x_column", "y_column"]
-                }
-            }
-        ]
+        execute_sql_func = types.FunctionDeclaration(
+            name="execute_sql",
+            description="Veritabanında DuckDB SQL sorgusu çalıştırır ve sonuçları döner.",
+            parameters=types.Schema(
+                type="OBJECT",
+                properties={
+                    "sql_query": types.Schema(
+                        type="STRING",
+                        description="Tablo adının 'sales' olduğu geçerli SQL sorgusu"
+                    )
+                },
+                required=["sql_query"]
+            )
+        )
+
+        generate_chart_func = types.FunctionDeclaration(
+            name="generate_chart",
+            description="Sorgu sonucuna göre ekrana çizilecek grafik konfigürasyonunu oluşturur.",
+            parameters=types.Schema(
+                type="OBJECT",
+                properties={
+                    "chart_type": types.Schema(type="STRING", enum=["bar", "line", "pie"]),
+                    "title": types.Schema(type="STRING"),
+                    "x_column": types.Schema(type="STRING"),
+                    "y_column": types.Schema(type="STRING")
+                },
+                required=["chart_type", "title", "x_column", "y_column"]
+            )
+        )
+        return [types.Tool(function_declarations=[execute_sql_func, generate_chart_func])]
+
+    def _generate_with_retry(self, contents, config, max_retries=3):
+        """API isteklerini yöneten ve 503/429 hatalarında otomatik bekleyip tekrar deneyen yardımcı fonksiyon"""
+        for attempt in range(max_retries):
+            try:
+                return self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=contents,
+                    config=config
+                )
+            except APIError as e:
+                error_msg = str(e)
+                # Sadece aşırı yüklenme (503) veya kota sınırı (429) hatalarında tekrar dene
+                if ("503" in error_msg or "429" in error_msg) and attempt < max_retries - 1:
+                    wait_time = 3 * (attempt + 1)  # 3, 6 sn bekler
+                    time.sleep(wait_time)
+                else:
+                    raise e
 
     def chat(self, user_message: str, history: list):
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(db_schema=self.data_provider.get_schema())
-        messages = history + [{"role": "user", "content": user_message}]
         
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=2000,
-            system=system_prompt,
+        config = types.GenerateContentConfig(
+            system_instruction=system_prompt,
             tools=self.get_tools(),
-            messages=messages
+            temperature=0.1
         )
+
+        # 1. Sohbet geçmişinde None veya boş içerik kalmasını engelliyoruz
+        contents = []
+        for msg in history:
+            role = "model" if msg["role"] == "assistant" else "user"
+            text_content = str(msg.get("content") or " ")
+            contents.append(types.Content(role=role, parts=[types.Part.from_text(text=text_content)]))
+        
+        contents.append(types.Content(role="user", parts=[types.Part.from_text(text=user_message)]))
+
+        # İlk modeli çağırma (Retry mantığı ile)
+        response = self._generate_with_retry(contents, config)
 
         last_df = None
         chart_config = None
 
-        while response.stop_reason == "tool_use":
-            tool_use_block = next(block for block in response.content if block.type == "tool_use")
-            tool_name = tool_use_block.name
-            tool_inputs = tool_use_block.input
-            tool_use_id = tool_use_block.id
+        # 2. Döngü ile birden fazla araç çağrısını (SQL + Grafik) sıralı işliyoruz
+        while response.function_calls:
+            contents.append(response.candidates[0].content)
+            
+            tool_response_parts = []
+            for call in response.function_calls:
+                tool_name = call.name
+                tool_inputs = call.args or {}
+                tool_result_content = ""
 
-            tool_result_content = ""
+                if tool_name == "execute_sql":
+                    try:
+                        sql = tool_inputs.get("sql_query", "")
+                        df = self.data_provider.run_query(sql)
+                        last_df = df
+                        tool_result_content = df.to_json(orient="records")
+                    except Exception as e:
+                        tool_result_content = f"Hata: {str(e)}"
 
-            if tool_name == "execute_sql":
-                try:
-                    df = self.data_provider.run_query(tool_inputs["sql_query"])
-                    last_df = df
-                    tool_result_content = df.to_json(orient="records")
-                except Exception as e:
-                    tool_result_content = f"Hata: {str(e)}"
+                elif tool_name == "generate_chart":
+                    chart_config = dict(tool_inputs)
+                    tool_result_content = "Grafik konfigürasyonu başarıyla kaydedildi."
 
-            elif tool_name == "generate_chart":
-                chart_config = tool_inputs
-                tool_result_content = "Grafik konfigürasyonu başarıyla kaydedildi."
+                tool_response_parts.append(
+                    types.Part.from_function_response(
+                        name=tool_name,
+                        response={"result": tool_result_content}
+                    )
+                )
 
-            messages.append({"role": "assistant", "content": response.content})
-            messages.append({
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": tool_use_id,
-                        "content": tool_result_content
-                    }
-                ]
-            })
+            contents.append(types.Content(
+                role="user",
+                parts=tool_response_parts
+            ))
 
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=2000,
-                system=system_prompt,
-                tools=self.get_tools(),
-                messages=messages
-            )
+            # Araç yanıtından sonra modeli tekrar çağırma (Retry mantığı ile)
+            response = self._generate_with_retry(contents, config)
 
-        final_text = next((block.text for block in response.content if block.type == "text"), "")
+        final_text = response.text or ""
+
+        # 3. Yanıtın None dönmesini kesin olarak engelliyoruz
+        if not final_text.strip():
+            if chart_config:
+                final_text = "İstediğiniz grafik oluşturuldu."
+            elif last_df is not None:
+                final_text = "Veri sorgulandı ve sonuçlar hazırlandı."
+            else:
+                final_text = "İşleminiz tamamlandı."
+
         return final_text, last_df, chart_config
